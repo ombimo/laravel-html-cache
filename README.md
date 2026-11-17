@@ -1,102 +1,156 @@
-# :package_description
+# Laravel HTML Cache
 
-[![Latest Version on Packagist](https://img.shields.io/packagist/v/:vendor_slug/:package_slug.svg?style=flat-square)](https://packagist.org/packages/:vendor_slug/:package_slug)
-[![GitHub Tests Action Status](https://github.com/spatie/package-skeleton-laravel/actions/workflows/run-tests.yml/badge.svg)](https://github.com/:vendor_slug/:package_slug/actions?query=workflow%3Arun-tests+branch%3Amain)
-[![GitHub Code Style Action Status](https://github.com/spatie/package-skeleton-laravel/actions/workflows/fix-php-code-style-issues.yml/badge.svg)](https://github.com/:vendor_slug/:package_slug/actions?query=workflow%3A"Fix+PHP+code+style+issues"+branch%3Amain)
-[![Total Downloads](https://img.shields.io/packagist/dt/:vendor_slug/:package_slug.svg?style=flat-square)](https://packagist.org/packages/:vendor_slug/:package_slug)
-<!--delete-->
----
-This repo can be used to scaffold a Laravel package. Follow these steps to get started:
+Route-based full page HTML cache for Laravel. Two middleware do the work:
 
-1. Press the "Use this template" button at the top of this repo to create a new repo with the contents of this skeleton.
-2. Run "php ./configure.php" to run a script that will replace all placeholders throughout all the files.
+- **`ResolveHtmlCache`** serves a stored `.html` file when there is a fresh one, before the session, the router, the controller or the database are touched.
+- **`WriteHtmlCache`** stores the rendered page after the application produced it (written in `terminate()`, after the response has been sent).
 
-   To run it unattended — from a script, or by handing it to a coding agent — pass `--no-interaction`
-   (`-n`) and the answers as options. It never prompts, and exits non-zero with a message naming any
-   option it still needs:
-
-   ```bash
-   php ./configure.php -n --vendor-name="Spatie" --package-name="laravel-ray"
-   ```
-
-   Run "php ./configure.php --help" for the full list of options.
-3. Have fun creating your package.
-4. If you need help creating a package, consider picking up our <a href="https://laravelpackage.training">Laravel Package Training</a> video course.
----
-<!--/delete-->
-This is where your description should go. Limit it to a paragraph or two. Consider adding a small example.
-
-## Support us
-
-[<img src="https://spatie.be/github-ad-image/:package_name.jpg" width="419px" />](https://spatie.be/github-ad-click/:package_name)
-
-We invest a lot of resources into creating [best in class open source packages](https://spatie.be/open-source). You can support us by [buying one of our paid products](https://spatie.be/open-source/support-us).
-
-We highly appreciate you sending us a postcard from your hometown, mentioning which of our package(s) you are using. You'll find our address on [our contact page](https://spatie.be/about-us). We publish all received postcards on [our virtual postcard wall](https://spatie.be/open-source/postcards).
+A config file decides which request paths are cached and for how long.
 
 ## Installation
 
-You can install the package via composer:
-
 ```bash
-composer require :vendor_slug/:package_slug
+composer require ombimo/laravel-html-cache
+php artisan vendor:publish --tag="html-cache-config"
 ```
 
-You can publish and run the migrations with:
+## Setup
 
-```bash
-php artisan vendor:publish --tag=":package_slug-migrations"
-php artisan migrate
-```
-
-You can publish the config file with:
-
-```bash
-php artisan vendor:publish --tag=":package_slug-config"
-```
-
-This is the contents of the published config file:
+Register both middleware globally (Laravel 11+ `bootstrap/app.php`). The resolver must come first so a hit never starts the session:
 
 ```php
-return [
-];
+use Ombimo\LaravelHtmlCache\Http\Middleware\ResolveHtmlCache;
+use Ombimo\LaravelHtmlCache\Http\Middleware\WriteHtmlCache;
+
+->withMiddleware(function (Middleware $middleware): void {
+    $middleware->prepend(ResolveHtmlCache::class);
+    $middleware->append(WriteHtmlCache::class);
+})
 ```
 
-Optionally, you can publish the views using
+Route middleware aliases `html-cache.resolve` and `html-cache.write` are registered too, but a route middleware runs after the session has started, so use the global form for the best performance.
 
-```bash
-php artisan vendor:publish --tag=":package_slug-views"
-```
-
-## Usage
+Then list the routes in `config/html-cache.php`:
 
 ```php
-$:variable = new VendorName\Skeleton();
-echo $:variable->echoPhrase('Hello, VendorName!');
+'default_ttl' => 3600,
+
+'routes' => [
+    '/'            => 600,                       // home page, 10 minutes
+    'artikel/*'    => 3600,                      // TTL in seconds
+    'faq'          => null,                      // never expires
+    'artikel'      => ['ttl' => 600, 'query' => ['page' => '~^[1-9]\d{0,2}$~']],
+],
+
+'except' => ['search'],
+'hosts'  => ['example.com', 'www.example.com'],
 ```
+
+Patterns are matched against the **request path** (`Str::is` wildcard syntax, where `*` also matches `/`). A pattern starting with `~` is a regular expression instead, e.g. `'~^venue/\d+/[^/]+$~' => 3600` for detail pages only. Route names cannot be used because the resolver runs before routing. The first matching pattern wins and `except` always wins.
+
+## What gets cached
+
+A response is stored only when **all** of these are true: the request is a `GET`, the path matches a route, the status is in `statuses` (default `200`), the body is `text/html`, it is not a redirect, stream or file download, it is not larger than `max_size`, and **it does not set cookies** (`cookies: 'skip'`). Never cache per-visitor output: CSRF tokens, flash messages, logged-in users. Set `cookies` to `'strip'` to store the body anyway and drop the cookies.
+
+Only successful pages are stored, so 404 URLs cannot fill the disk.
+
+### Query strings
+
+- `query.ignore` lists tracking parameters (`utm_*`, `fbclid`, ...) that are dropped from the key.
+- A route lists the parameters that change its output in `query`. Give a regex to restrict the value (`'page' => '~^[1-9]\d{0,2}$~'`).
+- Any other parameter makes the request **bypass** the cache (`query.unknown`), so nobody can create unlimited variants. Set it to `'ignore'` to drop unknown parameters instead.
+
+### Hosts
+
+The host is part of the cache key. Set `hosts` to the domains you serve; other `Host` headers bypass the cache.
+
+### Bypass
+
+Send the `X-Html-Cache-Bypass` header (or a cookie listed in `bypass.cookies`) to skip the cache, e.g. to preview unpublished content.
+
+The `X-Html-Cache` response header reports `HIT`, `MISS` or `BYPASS` (rename or disable it in `headers.debug`). Cached responses support `ETag` / `Last-Modified` and answer `304`.
+
+## Storage
+
+Pages are stored as `{host}/{path}/index.html` (query variants as `index__q-<hash>.html`). Unusual path segments (`..`, dot files, `index.html`, Windows reserved names, very long segments) are replaced by a hash, so a request can never write outside the store.
+
+```php
+'store' => [
+    'disk' => null,                               // a disk name from config/filesystems.php, or null
+    'path' => storage_path('app/html-cache'),     // used when disk is null
+],
+```
+
+**Served by PHP** (default): the resolver reads the file. This works with any disk.
+
+**Served by the web server**: point `path` into `public/` (e.g. `public_path('page-cache')`) and let nginx answer straight from disk, skipping PHP completely. The snippet below is a starting point, adapt it to your server and test it before relying on it:
+
+```nginx
+# only query-less URLs map 1:1 to a file; everything else goes to PHP
+map $args $page_cache_suffix {
+    ""      "/page-cache/$host$uri/index.html";
+    default "";
+}
+
+location / {
+    try_files $page_cache_suffix $uri $uri/ /index.php?$query_string;
+}
+```
+
+> Files are written with `0644`/`0755` permissions so the web server can read them. Expiry is **not** enforced by nginx: schedule `html-cache:clear --expired` (see below) so stale files are removed.
+
+## Expiry and clearing
+
+Pages expire after the TTL of their route; the TTL is read from the config at request time, so changing it applies to files that already exist. A stale page is regenerated by the next request.
+
+```bash
+php artisan html-cache:clear                      # everything
+php artisan html-cache:clear /artikel/foo         # one page, all query variants
+php artisan html-cache:clear http://example.com/artikel/foo
+php artisan html-cache:clear --pattern="artikel/*"
+php artisan html-cache:clear --host=example.com   # only one host
+php artisan html-cache:clear --expired            # expired pages + pages of routes no longer cached
+```
+
+Schedule the cleanup:
+
+```php
+Schedule::command('html-cache:clear --expired')->hourly();
+```
+
+From code:
+
+```php
+use Ombimo\LaravelHtmlCache\Facades\LaravelHtmlCache; // alias: HtmlCache
+
+LaravelHtmlCache::forget('/artikel/foo');
+LaravelHtmlCache::forgetMatching('artikel/*');
+LaravelHtmlCache::prune();
+LaravelHtmlCache::flush();
+```
+
+The commands only ever delete files named `index.html` / `index__q-*.html` below a host directory, never anything else in the store directory.
+
+## Notes
+
+- A cache hit is served before `TrustProxies`, `TrustHosts` and maintenance mode checks when the resolver is prepended. That is what makes it fast; use `hosts` to restrict what can be cached.
+- Without `ResolveHtmlCache` the writer still works but rewrites the page on every request.
 
 ## Testing
 
 ```bash
-composer test
+composer test       # Pest
+composer analyse    # Larastan
+composer format     # Pint
 ```
 
 ## Changelog
 
 Please see [CHANGELOG](CHANGELOG.md) for more information on what has changed recently.
 
-## Contributing
-
-Please see [CONTRIBUTING](CONTRIBUTING.md) for details.
-
-## Security Vulnerabilities
-
-Please review [our security policy](../../security/policy) on how to report security vulnerabilities.
-
 ## Credits
 
-- [:author_name](https://github.com/:author_username)
-- [All Contributors](../../contributors)
+- [Bimo Aji Pamungkas](https://github.com/ombimo)
 
 ## License
 
