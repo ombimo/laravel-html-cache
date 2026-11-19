@@ -4,32 +4,27 @@ namespace Ombimo\LaravelHtmlCache\Support;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Ombimo\LaravelHtmlCache\Contracts\PathGenerator;
+use Ombimo\LaravelHtmlCache\Paths\DefaultPathGenerator;
 use Ombimo\LaravelHtmlCache\Rules\Rule;
 use Ombimo\LaravelHtmlCache\Rules\RuleSet;
 
 /**
- * Maps a request to a relative file path and back:
+ * Turns a request into a cache key. It decides which query parameters count
+ * (config "query" and the route's own allowlist) and leaves the file layout to
+ * the configured PathGenerator, e.g.
  *
- *   example.com/artikel/foo/index.html            GET /artikel/foo
- *   example.com/index.html                        GET /
- *   example.com/artikel/index__q-<hash>.html      GET /artikel?page=2
- *
- * Every path segment is either made of safe characters or replaced by a hash,
- * so a request can never escape the store or collide with the file names.
+ *   default                   example.com/artikel/foo/index.html
+ *   last_as_name              example.com/artikel/foo.html
+ *   last_as_name_with_prefix  example.com/ab/cd/artikel/foo.html
  */
 final class KeyGenerator
 {
-    public const FILE = 'index.html';
-
-    public const QUERY_PREFIX = 'index__q-';
-
-    private const HASH_PREFIX = '_h-';
-
-    private const MAX_SEGMENT = 100;
-
-    private const MAX_PATH = 180;
-
     private const MAX_QUERY_VALUE = 128;
+
+    public function __construct(
+        private readonly PathGenerator $paths = new DefaultPathGenerator,
+    ) {}
 
     /**
      * @param  list<string>  $ignore  query parameter patterns dropped from the key
@@ -44,37 +39,28 @@ final class KeyGenerator
             return null;
         }
 
-        return $this->directory($request->getHost(), RuleSet::normalize($request->path()))
-            .'/'.$this->fileName($query);
+        return $this->paths->key($request->getHost(), RuleSet::normalize($request->path()), $query);
     }
 
     /**
-     * Directory that holds every variant of a page, e.g. "example.com/artikel/foo".
+     * Directory that holds the file of a page and its query variants.
      */
     public function directory(string $host, string $path): string
     {
-        $path = RuleSet::normalize($path);
-        $directory = $this->host($host);
+        return $this->paths->directory($host, RuleSet::normalize($path));
+    }
 
-        if ($path === '/') {
-            return $directory;
-        }
-
-        $segments = array_map($this->segment(...), explode('/', $path));
-        $joined = implode('/', $segments);
-
-        if (strlen($joined) > self::MAX_PATH) {
-            $joined = self::HASH_PREFIX.substr(sha1($path), 0, 20);
-        }
-
-        return $directory.'/'.$joined;
+    /**
+     * Whether a key is the page itself or one of its query variants.
+     */
+    public function belongsTo(string $key, string $host, string $path): bool
+    {
+        return $this->paths->belongsTo($key, $host, RuleSet::normalize($path));
     }
 
     public function host(string $host): string
     {
-        $host = trim(preg_replace('~[^a-z0-9.\-]~', '_', strtolower($host)) ?? '', '.');
-
-        return $host === '' ? '_' : substr($host, 0, self::MAX_SEGMENT);
+        return $this->paths->host($host);
     }
 
     /**
@@ -82,27 +68,7 @@ final class KeyGenerator
      */
     public function parse(string $key): ?array
     {
-        if (preg_match('~^(?<host>[^/]+)/(?:(?<path>.+)/)?index(?<query>__q-[a-f0-9]{20})?\.html$~', $key, $matches) !== 1) {
-            return null;
-        }
-
-        $path = ($matches['path'] ?? '') === '' ? '/' : $matches['path'];
-
-        if ($path !== '/') {
-            foreach (explode('/', $path) as $segment) {
-                if (str_starts_with($segment, self::HASH_PREFIX)) {
-                    $path = null;
-
-                    break;
-                }
-            }
-        }
-
-        return [
-            'host' => $matches['host'],
-            'path' => $path,
-            'query' => ($matches['query'] ?? '') !== '',
-        ];
+        return $this->paths->parse($key);
     }
 
     /**
@@ -165,30 +131,5 @@ final class KeyGenerator
         }
 
         return false;
-    }
-
-    /**
-     * @param  array<string, string>  $query
-     */
-    private function fileName(array $query): string
-    {
-        if ($query === []) {
-            return self::FILE;
-        }
-
-        return self::QUERY_PREFIX.substr(sha1(http_build_query($query)), 0, 20).'.html';
-    }
-
-    private function segment(string $segment): string
-    {
-        $safe = preg_match('#^[A-Za-z0-9._~%-]{1,'.self::MAX_SEGMENT.'}$#', $segment) === 1
-            && ! str_starts_with($segment, '.')
-            && ! str_ends_with($segment, '.')
-            && $segment !== self::FILE
-            && ! str_starts_with($segment, self::QUERY_PREFIX)
-            && ! str_starts_with($segment, self::HASH_PREFIX)
-            && preg_match('~^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$~i', $segment) !== 1;
-
-        return $safe ? $segment : self::HASH_PREFIX.substr(sha1($segment), 0, 20);
     }
 }

@@ -33,6 +33,68 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Compression
+    |--------------------------------------------------------------------------
+    |
+    | Store pages gzipped to save disk space (HTML usually shrinks by 70-85%).
+    | A page is written as "<file>.html.gz" instead of "<file>.html". Pages that
+    | are already stored keep working whichever way you set this, a file is
+    | simply replaced the next time its page is regenerated.
+    |
+    | - "enabled":       gzip new pages. Needs the PHP zlib extension; without
+    |                    it pages are stored as plain html.
+    | - "level":         1 (fastest) to 9 (smallest). 6 is a good balance.
+    | - "serve_encoded": when PHP serves a hit and the client accepts gzip, send
+    |                    the stored bytes as they are (Content-Encoding: gzip)
+    |                    instead of decompressing them. false always sends
+    |                    plain html.
+    |
+    | A web server that serves the files itself needs to know about the .gz
+    | files, see the README (nginx `gzip_static`).
+    |
+    */
+    'compress' => [
+        'enabled' => env('HTML_CACHE_COMPRESS', false),
+        'level' => 6,
+        'serve_encoded' => true,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Path generator
+    |--------------------------------------------------------------------------
+    |
+    | How a page maps to a file inside the store.
+    |
+    |   "default"                   blog/test => example.com/blog/test/index.html
+    |   "last_as_name"              blog/test => example.com/blog/test.html
+    |   "last_as_name_with_prefix"  blog/test => example.com/ab/cd/blog/test.html
+    |                               ("ab/cd" is taken from md5("blog/test"), it
+    |                               spreads the files over many directories)
+    |
+    | Or the class name of your own implementation of
+    | Ombimo\LaravelHtmlCache\Contracts\PathGenerator.
+    |
+    | Existing files are not moved when you change it: run
+    | `php artisan html-cache:clear` BEFORE switching.
+    |
+    | Only "last_as_name" (and "default") can be served straight by the web server,
+    | because it cannot calculate the md5 prefix.
+    |
+    */
+    'path_generator' => env('HTML_CACHE_PATH_GENERATOR', 'default'),
+
+    /*
+    | Used by "last_as_name_with_prefix": "levels" directories of "length"
+    | characters of the md5 hash (levels * length may not exceed 32).
+    */
+    'path_prefix' => [
+        'levels' => 2,
+        'length' => 2,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Default TTL
     |--------------------------------------------------------------------------
     |

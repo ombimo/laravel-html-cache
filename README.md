@@ -72,7 +72,7 @@ The `X-Html-Cache` response header reports `HIT`, `MISS` or `BYPASS` (rename or 
 
 ## Storage
 
-Pages are stored as `{host}/{path}/index.html` (query variants as `index__q-<hash>.html`). Unusual path segments (`..`, dot files, `index.html`, Windows reserved names, very long segments) are replaced by a hash, so a request can never write outside the store.
+By default pages are stored as `{host}/{path}/index.html` (query variants as `index__q-<hash>.html`), see [Path generators](#path-generators) for other layouts. Unusual path segments (`..`, dot files, `index.html`, Windows reserved names, very long segments) are replaced by a hash, so a request can never write outside the store.
 
 ```php
 'store' => [
@@ -80,6 +80,69 @@ Pages are stored as `{host}/{path}/index.html` (query variants as `index__q-<has
     'path' => storage_path('app/html-cache'),     // used when disk is null
 ],
 ```
+
+### Compression
+
+HTML shrinks by roughly 70-85% when gzipped. Turn it on to save disk space (needs the PHP `zlib` extension, otherwise pages are stored as plain html):
+
+```php
+'compress' => [
+    'enabled' => env('HTML_CACHE_COMPRESS', false),
+    'level' => 6,              // 1 (fastest) to 9 (smallest)
+    'serve_encoded' => true,   // see below
+],
+```
+
+A compressed page is written next to where the plain file would be, with `.gz` appended (`{host}/blog/test/index.html.gz`). Path generators, `html-cache:clear` and the TTL work exactly the same; `max_size` is checked on the uncompressed page.
+
+- **Switching is safe.** Both forms are always readable, so turning compression on or off keeps serving the files that already exist. A file is replaced (and its old form deleted) the next time its page is regenerated. Run `html-cache:clear` if you want the disk space back at once.
+- **Served by PHP.** A client that accepts gzip gets the stored bytes as they are (`Content-Encoding: gzip`, `Vary: Accept-Encoding`), so a hit costs no CPU. Any other client gets the page decompressed. Set `serve_encoded` to `false` to always send plain html. The `ETag` differs between the two forms.
+- **Served by the web server.** nginx must know about the `.gz` files. With `gzip_static` it sends them to clients that accept gzip, with no CPU cost:
+
+```nginx
+gzip_static on;
+gunzip on;   # needs ngx_http_gunzip_module: lets clients without gzip read the .gz file too
+
+map $args $page_cache_suffix {
+    ""      "/page-cache/$host$uri/index.html";
+    default "";
+}
+
+location / {
+    try_files $page_cache_suffix $uri $uri/ /index.php?$query_string;
+}
+```
+
+> `try_files` needs the plain file to exist. nginx does not look for a `.gz` file on its own there, so with compression on and **no plain file**, use `gzip_static always;` together with `gunzip on;` (both modules required), or leave compression off for pages that nginx serves. Test your setup before relying on it.
+
+### Path generators
+
+`path_generator` in the config decides how a page maps to a file. The default keeps the layout used so far, so nothing changes for an existing app.
+
+| `path_generator` | `blog/test` is stored as | `/` |
+|---|---|---|
+| `default` | `{host}/blog/test/index.html` | `{host}/index.html` |
+| `last_as_name` | `{host}/blog/test.html` | `{host}/index.html` |
+| `last_as_name_with_prefix` | `{host}/ab/cd/blog/test.html` | `{host}/ab/cd/index.html` |
+
+With `last_as_name_with_prefix` the `ab/cd` directories are the first characters of `md5('blog/test')`, which spreads a large site over many directories. Query variants always stay next to their page (`blog__q-<hash>.html`). The size of the prefix is configurable:
+
+```php
+'path_generator' => 'last_as_name_with_prefix',
+'path_prefix' => ['levels' => 2, 'length' => 2],   // levels * length <= 32
+```
+
+Use your own layout by giving the class name of an implementation of `Ombimo\LaravelHtmlCache\Contracts\PathGenerator` (it is resolved from the container):
+
+```php
+'path_generator' => App\Cache\MyPathGenerator::class,
+```
+
+Things to know:
+
+- Existing files are **not moved** when you switch. Run `php artisan html-cache:clear` before changing `path_generator`.
+- Clearing only touches files the active generator could have written (`parse()` returns `null` for anything else), but in the `last_as_name*` layouts any `.html` file with a plain name below a host directory counts as a cache file, so do not keep your own files in the store.
+- nginx can serve `default` and `last_as_name` directly (`try_files /page-cache/$host$uri.html /page-cache/$host$uri/index.html ...`). `last_as_name_with_prefix` needs PHP, because nginx cannot calculate the md5 prefix.
 
 **Served by PHP** (default): the resolver reads the file. This works with any disk.
 
@@ -129,7 +192,7 @@ LaravelHtmlCache::prune();
 LaravelHtmlCache::flush();
 ```
 
-The commands only ever delete files named `index.html` / `index__q-*.html` below a host directory, never anything else in the store directory.
+The commands only ever delete files the configured path generator could have written, never anything else in the store directory.
 
 ## Notes
 

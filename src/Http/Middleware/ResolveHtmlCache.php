@@ -34,7 +34,7 @@ class ResolveHtmlCache
             return $this->cache->tag($next($request), 'BYPASS');
         }
 
-        $page = $this->cache->fresh($rule, $key);
+        $page = $this->cache->fresh($rule, $key, $request);
 
         if ($page !== null) {
             return $this->cache->respond($request, $page);

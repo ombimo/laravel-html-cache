@@ -81,7 +81,7 @@ class LaravelHtmlCache
     /**
      * The stored page when it exists and has not expired.
      */
-    public function fresh(Rule $rule, string $key): ?CachedPage
+    public function fresh(Rule $rule, string $key, ?Request $request = null): ?CachedPage
     {
         $modified = $this->store->lastModified($key);
 
@@ -93,9 +93,54 @@ class LaravelHtmlCache
             return null;
         }
 
+        // A page stored as gzip goes to a client that accepts it as it is, no decompression.
+        if ($request !== null && $this->servesEncoded() && $this->acceptsGzip($request)) {
+            $gzip = $this->store->getGzip($key);
+
+            if ($gzip !== null) {
+                return new CachedPage($gzip, $modified, gzipped: true);
+            }
+        }
+
         $html = $this->store->get($key);
 
         return $html === null ? null : new CachedPage($html, $modified);
+    }
+
+    /**
+     * gzip level new pages are stored with, null when compression is off.
+     *
+     * @param  mixed  $compress  the "compress" config value
+     */
+    public static function level(mixed $compress): ?int
+    {
+        $compress = is_array($compress) ? $compress : [];
+
+        if (! ($compress['enabled'] ?? false)) {
+            return null;
+        }
+
+        return max(1, min(9, is_numeric($compress['level'] ?? null) ? (int) $compress['level'] : 6));
+    }
+
+    private function servesEncoded(): bool
+    {
+        return (bool) $this->config->get('html-cache.compress.serve_encoded', true);
+    }
+
+    private function acceptsGzip(Request $request): bool
+    {
+        $header = strtolower((string) $request->headers->get('Accept-Encoding'));
+
+        foreach (explode(',', $header) as $coding) {
+            [$name, $parameter] = array_pad(explode(';', $coding, 2), 2, '');
+
+            if (in_array(trim($name), ['gzip', 'x-gzip'], true)) {
+                return ! preg_match('~q\s*=\s*0(\.0*)?\s*$~', trim($parameter));
+            }
+        }
+
+        return false;
     }
 
     public function shouldStore(Request $request, SymfonyResponse $response): bool
@@ -146,7 +191,13 @@ class LaravelHtmlCache
      */
     public function respond(Request $request, CachedPage $page): Response
     {
-        $response = new Response($page->html, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
+        $response = new Response($page->body, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
+
+        if ($page->gzipped) {
+            $response->headers->set('Content-Encoding', 'gzip');
+            $response->setVary('Accept-Encoding', false);
+        }
+
         $response->setEtag($page->etag());
         $response->setLastModified(Carbon::createFromTimestampUTC($page->lastModified));
 
@@ -198,8 +249,10 @@ class LaravelHtmlCache
 
         foreach ($hosts as $name) {
             foreach ($this->store->files($this->keys->directory($name, $path), recursive: false) as $key) {
-                $this->store->delete($key);
-                $deleted++;
+                if ($this->keys->belongsTo($key, $name, $path)) {
+                    $this->store->delete($key);
+                    $deleted++;
+                }
             }
         }
 
@@ -272,7 +325,19 @@ class LaravelHtmlCache
      */
     public function flush(): int
     {
-        return $this->store->flush();
+        $deleted = 0;
+
+        foreach ($this->store->files() as $key) {
+            // Only files the path generator wrote: never a foreign .html in the store directory.
+            if ($this->keys->parse($key) !== null) {
+                $this->store->delete($key);
+                $deleted++;
+            }
+        }
+
+        $this->store->deleteEmptyDirectories();
+
+        return $deleted;
     }
 
     private function rules(): RuleSet
